@@ -1,9 +1,16 @@
 # app.py
 # This is the front door of MedRAG — the interface users interact with.
-# We use Gradio to build the UI, but instead of the default Gradio look,
-# we write custom HTML and CSS to give it a clean, professional medical feel.
-# The pipeline does all the heavy lifting — this file just handles
-# presenting the question, calling the pipeline, and displaying the answer.
+# We use Gradio's Chatbot to give it a real conversational feel, but instead
+# of the default Gradio look, we write custom HTML and CSS to give it a
+# clean, professional medical feel. The pipeline does all the heavy lifting —
+# this file just handles presenting the question, calling the pipeline, and
+# displaying the answer with its sources inline in the chat bubble.
+#
+# Note: each turn is still answered independently by the RAG pipeline
+# (we don't feed prior chat history into retrieval) — the "chat" here is a
+# conversational display, not multi-turn memory. That keeps every answer
+# grounded strictly in retrieved documents, which is what we want for
+# clinical QA — no risk of the LLM drifting based on earlier chat turns.
 
 import gradio as gr
 from pipeline import MedRAGPipeline
@@ -13,27 +20,28 @@ from pipeline import MedRAGPipeline
 pipeline = MedRAGPipeline()
 
 
-def answer_question(question: str):
+def respond(message: str, history: list):
     # Basic validation — no point calling the pipeline with an empty string
-    if not question.strip():
-        return "Please enter a clinical question.", ""
+    if not message.strip():
+        return "Please enter a clinical question."
 
-    result = pipeline.run(question)
-
+    result = pipeline.run(message)
     answer = result["answer"]
 
-    # Format the sources into a clean readable list
+    # Fold the sources into the same chat bubble as a small footer,
+    # so the conversation stays in one clean thread instead of
+    # splitting answer/sources into separate boxes.
     if result["sources"]:
         sources_list = "\n".join(f"- {s}" for s in result["sources"])
-        sources_display = f"Retrieved from {result['chunks_used']} chunks across:\n{sources_list}"
+        answer += f"\n\n---\n**Sources** ({result['chunks_used']} chunks retrieved):\n{sources_list}"
     else:
-        sources_display = "No sources retrieved."
+        answer += "\n\n---\n*No matching documents found in the knowledge base.*"
 
-    return answer, sources_display
+    return answer
 
 
 # Custom CSS — Poppins font, deep navy and clean white medical palette,
-# MEDRAG title big and bold, everything else minimal and professional
+# MEDRAG title big and bold, chat bubbles styled to match the brand
 custom_css = """
 @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700;800&display=swap');
 
@@ -93,27 +101,28 @@ body, .gradio-container {
 /* Main content area */
 .medrag-body {
     max-width: 900px;
-    margin: 40px auto;
+    margin: 24px auto;
     padding: 0 24px;
 }
 
-/* Input and output cards */
-.medrag-card {
-    background: #ffffff;
-    border-radius: 10px;
-    border: 1px solid #e2e8f0;
-    padding: 28px;
-    margin-bottom: 20px;
-    box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+/* Chat window */
+.gradio-container .bubble-wrap, .gradio-container [class*="chatbot"] {
+    background: #ffffff !important;
+    border-radius: 10px !important;
+    border: 1px solid #e2e8f0 !important;
 }
 
-.medrag-label {
-    font-size: 11px;
-    font-weight: 600;
-    letter-spacing: 1.5px;
-    text-transform: uppercase;
-    color: #64748b;
-    margin-bottom: 10px;
+/* User bubble */
+.message.user {
+    background: #0a2540 !important;
+    color: #ffffff !important;
+}
+
+/* Bot bubble */
+.message.bot {
+    background: #f8fafc !important;
+    color: #1e293b !important;
+    border: 1px solid #e2e8f0 !important;
 }
 
 /* Textboxes */
@@ -135,7 +144,7 @@ textarea:focus, input[type="text"]:focus {
     background: #ffffff !important;
 }
 
-/* Submit button */
+/* Buttons */
 button.primary {
     background: #0a2540 !important;
     color: #ffffff !important;
@@ -146,24 +155,12 @@ button.primary {
     text-transform: uppercase !important;
     border: none !important;
     border-radius: 8px !important;
-    padding: 14px 32px !important;
     cursor: pointer !important;
     transition: background 0.2s ease !important;
-    width: 100% !important;
 }
 
 button.primary:hover {
     background: #1a4a7a !important;
-}
-
-/* Example questions */
-.examples-header {
-    font-size: 11px;
-    font-weight: 600;
-    letter-spacing: 1.5px;
-    text-transform: uppercase;
-    color: #64748b;
-    margin-bottom: 12px;
 }
 
 /* Footer */
@@ -173,90 +170,56 @@ button.primary:hover {
     font-size: 12px;
     color: #94a3b8;
     border-top: 1px solid #e2e8f0;
-    margin-top: 40px;
+    margin-top: 24px;
 }
 """
 
-# Build the Gradio interface using Blocks for full layout control
-with gr.Blocks(css=custom_css, title="MedRAG — Clinical QA") as demo:
+HEADER_HTML = """
+    <div class="medrag-header">
+        <h1 class="medrag-title">MED<span>RAG</span></h1>
+        <p class="medrag-subtitle">Clinical Retrieval-Augmented Generation</p>
+        <span class="medrag-disclaimer">
+            For research purposes only — not a substitute for professional medical advice
+        </span>
+    </div>
+"""
 
-    # Header
-    gr.HTML("""
-        <div class="medrag-header">
-            <h1 class="medrag-title">MED<span>RAG</span></h1>
-            <p class="medrag-subtitle">Clinical Retrieval-Augmented Generation</p>
-            <span class="medrag-disclaimer">
-                For research purposes only — not a substitute for professional medical advice
-            </span>
-        </div>
-    """)
+FOOTER_HTML = """
+    <div class="medrag-footer">
+        MedRAG — Built by Rabina Karki &nbsp;|&nbsp;
+        MS Data Science, University of Central Oklahoma &nbsp;|&nbsp;
+        ChromaDB · sentence-transformers · Groq LLaMA 3.3
+    </div>
+"""
+
+EXAMPLES = [
+    "What are the symptoms of type 2 diabetes?",
+    "How is hypertension diagnosed and classified?",
+    "What medications are used to treat asthma?",
+    "What is the difference between bacterial and viral infections?",
+]
+
+with gr.Blocks(title="MedRAG — Clinical QA") as demo:
+    gr.HTML(HEADER_HTML)
 
     with gr.Column(elem_classes="medrag-body"):
-
-        # Question input card
-        gr.HTML('<div class="medrag-label">Clinical Question</div>')
-        question_input = gr.Textbox(
-            placeholder="e.g. What are the first-line medications for hypertension?",
-            lines=3,
-            show_label=False,
-            container=False
-        )
-        submit_btn = gr.Button("Submit Query", variant="primary")
-
-        # Answer output
-        gr.HTML('<div class="medrag-label" style="margin-top:24px;">Answer</div>')
-        answer_output = gr.Textbox(
-            lines=10,
-            show_label=False,
-            interactive=False,
-            container=False,
-            placeholder="Answer will appear here after submission..."
+        gr.ChatInterface(
+            fn=respond,
+            examples=EXAMPLES,
+            chatbot=gr.Chatbot(
+                height=520,
+                placeholder="Ask a clinical question to get started — answers are grounded in the retrieved documents, with sources listed below each response.",
+                show_label=False,
+            ),
+            textbox=gr.Textbox(
+                placeholder="e.g. What are the first-line medications for hypertension?",
+                show_label=False,
+                container=False,
+            ),
         )
 
-        # Sources output
-        gr.HTML('<div class="medrag-label" style="margin-top:16px;">Sources</div>')
-        sources_output = gr.Textbox(
-            lines=3,
-            show_label=False,
-            interactive=False,
-            container=False,
-            placeholder="Retrieved source documents will be listed here..."
-        )
-
-        # Example questions
-        gr.HTML('<div class="examples-header" style="margin-top:28px;">Example Queries</div>')
-        gr.Examples(
-            examples=[
-                ["What are the symptoms of type 2 diabetes?"],
-                ["How is hypertension diagnosed and classified?"],
-                ["What medications are used to treat asthma?"],
-                ["What is the difference between bacterial and viral infections?"],
-            ],
-            inputs=question_input
-        )
-
-    # Footer
-    gr.HTML("""
-        <div class="medrag-footer">
-            MedRAG — Built by Rabina Karki &nbsp;|&nbsp;
-            MS Data Science, University of Central Oklahoma &nbsp;|&nbsp;
-            ChromaDB · sentence-transformers · Groq LLaMA 3.3
-        </div>
-    """)
-
-    # Wire up the button and Enter key to the pipeline
-    submit_btn.click(
-        fn=answer_question,
-        inputs=question_input,
-        outputs=[answer_output, sources_output]
-    )
-
-    question_input.submit(
-        fn=answer_question,
-        inputs=question_input,
-        outputs=[answer_output, sources_output]
-    )
+    gr.HTML(FOOTER_HTML)
 
 
 if __name__ == "__main__":
-    demo.launch(share=False)
+    demo.launch(share=False, css=custom_css, server_name="127.0.0.1")
